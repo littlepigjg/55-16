@@ -94,7 +94,7 @@ class AuthorSimilarity:
     @staticmethod
     def compute(author1: str, author2: str) -> float:
         if not author1 or not author2:
-            return 0.5
+            return 0.2
         clean1 = TextNormalizer.normalize_author(author1)
         clean2 = TextNormalizer.normalize_author(author2)
         if clean1 == clean2:
@@ -235,8 +235,8 @@ class TitleSimilarity:
 class OverallBookSimilarity:
     def __init__(self):
         self.weights = {
-            "isbn": 0.40,
-            "author": 0.25,
+            "isbn": 0.30,
+            "author": 0.35,
             "title": 0.20,
             "simhash": 0.10,
             "size": 0.05,
@@ -260,14 +260,14 @@ class OverallBookSimilarity:
 
         weights = dict(self.weights)
         if not (isbn1 and isbn2):
-            weights["simhash"] += weights["isbn"] * 0.6
+            weights["simhash"] += weights["isbn"] * 0.4
             weights["title"] += weights["isbn"] * 0.2
-            weights["author"] += weights["isbn"] * 0.2
+            weights["author"] += weights["isbn"] * 0.4
             weights["isbn"] = 0.0
         if simhash1 == 0 or simhash2 == 0:
             extra = weights["simhash"]
-            weights["title"] += extra * 0.5
-            weights["author"] += extra * 0.3
+            weights["title"] += extra * 0.3
+            weights["author"] += extra * 0.5
             weights["size"] += extra * 0.2
             weights["simhash"] = 0.0
 
@@ -278,13 +278,18 @@ class OverallBookSimilarity:
         weighted = sum(scores[k] * weights[k] for k in scores)
         final_score = weighted / total_weight
 
+        if not author1 or not author2:
+            final_score = min(final_score, 0.28)
+
         if scores["author"] < 0.25 and scores["isbn"] < 0.5:
-            final_score = min(final_score, 0.35)
+            final_score = min(final_score, 0.25)
         elif scores["author"] < 0.45 and scores["isbn"] < 0.5:
-            final_score = min(final_score, 0.65)
+            final_score = min(final_score, 0.50)
+        elif scores["author"] < 0.60 and scores["isbn"] < 0.5:
+            final_score = min(final_score, 0.70)
 
         if scores["title"] < 0.4:
-            final_score = min(final_score, 0.45)
+            final_score = min(final_score, 0.40)
 
         return final_score, scores
 

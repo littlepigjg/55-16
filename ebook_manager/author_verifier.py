@@ -101,7 +101,6 @@ class AuthorVerifier:
             )
 
         author_sim = AuthorSimilarity.compute(author1, author2)
-        title_sim = TitleSimilarity.compute(title1, author2)
         title_sim = TitleSimilarity.compute(title1, title2)
 
         pseudonym_match, pseudonym_conf = self._check_pseudonyms(author1, author2)
@@ -176,19 +175,21 @@ class AuthorVerifier:
                 return 1.0
             else:
                 return 0.0
-        return 0.45 * author_sim + 0.55 * title_sim
+        return 0.60 * author_sim + 0.40 * title_sim
 
     def _final_decision(self, author_ok: bool, title_ok: bool,
                         overall: float, author_sim: float, title_sim: float) -> bool:
+        if author_sim < 0.30:
+            return False
+        if not author_ok and author_sim < 0.50:
+            return False
         if overall >= 0.80 and author_ok and title_ok:
             return True
         if overall >= 0.75 and author_ok:
             return True
-        if overall >= 0.85 and title_ok and author_sim >= 0.45:
+        if overall >= 0.85 and title_ok and author_sim >= 0.55:
             return True
-        if author_sim < 0.25:
-            return False
-        if overall < 0.55:
+        if overall < 0.60:
             return False
         if not author_ok:
             return False

@@ -14,6 +14,7 @@ from ..metadata_parser import MetadataParser
 from ..metadata_editor import MetadataEditor
 from ..network_source import NetworkSourceManager
 from ..converter import FormatConverter
+from ..recycle_bin import RecycleBin
 
 from .scanner_panel import ScannerPanel
 from .book_table import BookTableWidget
@@ -21,13 +22,15 @@ from .edit_panel import MetadataEditPanel
 from .search_dialog import OnlineSearchDialog
 from .convert_dialog import ConvertDialog
 from .workers import ScanWorker, ParseWorker
+from .dedup_panel import DedupPanel
+from .recycle_panel import RecyclePanel
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("📚 电子书元数据管理器")
-        self.setMinimumSize(1200, 700)
+        self.setWindowTitle("📚 电子书元数据管理器 - 智能去重助手")
+        self.setMinimumSize(1300, 800)
 
         self._books: list = []
         self._scanner = BookshelfScanner()
@@ -35,6 +38,7 @@ class MainWindow(QMainWindow):
         self._editor = MetadataEditor()
         self._source_manager = NetworkSourceManager()
         self._converter = FormatConverter()
+        self._recycle_bin = RecycleBin()
 
         self._init_ui()
         self._init_menu()
@@ -46,29 +50,44 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
 
-        self.scanner_panel = ScannerPanel()
-        self.scanner_panel.scan_requested.connect(self._on_scan_requested)
-        main_layout.addWidget(self.scanner_panel)
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.library_tab = self._create_library_tab()
+        self.dedup_tab = self._create_dedup_tab()
+        self.recycle_tab = self._create_recycle_tab()
 
-        self.book_table = BookTableWidget()
-        self.book_table.selection_changed.connect(self._on_selection_changed)
-        self.book_table.edit_requested.connect(self._on_edit_requested)
-        self.book_table.convert_requested.connect(self._on_convert_requested)
-        self.book_table.search_meta_requested.connect(self._on_search_meta_requested)
-        splitter.addWidget(self.book_table)
+        self.tab_widget.addTab(self.library_tab, "📚 书库")
+        self.tab_widget.addTab(self.dedup_tab, "🔍 智能去重")
+        self.tab_widget.addTab(self.recycle_tab, "🗑 回收站")
 
-        self.edit_panel = MetadataEditPanel()
-        self.edit_panel.save_requested.connect(self._on_save_metadata)
-        splitter.addWidget(self.edit_panel)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(self.tab_widget)
 
         self.setStyleSheet("""
             QMainWindow { background: #f5f6fa; }
+            QTabWidget::pane {
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #e9ecef;
+                border: 1px solid #ddd;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 8px 20px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #4a9eff;
+                color: white;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #dee2e6;
+            }
             QGroupBox {
                 font-weight: bold;
                 border: 1px solid #ddd;
@@ -111,7 +130,70 @@ class MainWindow(QMainWindow):
                 background: white;
             }
             QPushButton:hover { background: #f0f7ff; border-color: #4a9eff; }
+            QListWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #eee;
+            }
+            QListWidget::item:selected {
+                background: #4a9eff33;
+                color: #000;
+            }
         """)
+
+    def _create_library_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.scanner_panel = ScannerPanel()
+        self.scanner_panel.scan_requested.connect(self._on_scan_requested)
+        layout.addWidget(self.scanner_panel)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self.book_table = BookTableWidget()
+        self.book_table.selection_changed.connect(self._on_selection_changed)
+        self.book_table.edit_requested.connect(self._on_edit_requested)
+        self.book_table.convert_requested.connect(self._on_convert_requested)
+        self.book_table.search_meta_requested.connect(self._on_search_meta_requested)
+        splitter.addWidget(self.book_table)
+
+        self.edit_panel = MetadataEditPanel()
+        self.edit_panel.save_requested.connect(self._on_save_metadata)
+        splitter.addWidget(self.edit_panel)
+
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
+        return tab
+
+    def _create_dedup_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.dedup_panel = DedupPanel(self._books)
+        self.dedup_panel.books_removed.connect(self._on_books_removed)
+        layout.addWidget(self.dedup_panel, 1)
+
+        return tab
+
+    def _create_recycle_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.recycle_panel = RecyclePanel()
+        self.recycle_panel.entry_restored.connect(self._on_entry_restored)
+        self.recycle_panel.entry_permanently_deleted.connect(self._on_entry_permanently_deleted)
+        layout.addWidget(self.recycle_panel, 1)
+
+        return tab
 
     def _init_menu(self):
         menubar = self.menuBar()
@@ -144,6 +226,16 @@ class MainWindow(QMainWindow):
         convert_action.triggered.connect(lambda: self._on_convert_requested(self.book_table.get_selected_books()))
         tool_menu.addAction(convert_action)
 
+        dedup_action = QAction("🔍 智能去重(&D)", self)
+        dedup_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        tool_menu.addAction(dedup_action)
+
+        recycle_action = QAction("🗑 回收站(&R)", self)
+        recycle_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(2))
+        tool_menu.addAction(recycle_action)
+
+        tool_menu.addSeparator()
+
         calibre_status = QAction("Calibre 状态检查", self)
         calibre_status.triggered.connect(self._check_calibre)
         tool_menu.addAction(calibre_status)
@@ -155,6 +247,12 @@ class MainWindow(QMainWindow):
 
     def _init_statusbar(self):
         self.statusBar().showMessage("就绪")
+
+    def _on_tab_changed(self, index: int):
+        if index == 1:
+            self.dedup_panel.update_books(self._books)
+        elif index == 2:
+            self.recycle_panel.refresh()
 
     def _on_scan_requested(self, directories: list, recursive: bool):
         self.statusBar().showMessage("正在扫描目录...")
@@ -180,6 +278,8 @@ class MainWindow(QMainWindow):
         self._books = books
         self.book_table.load_books(books)
         self.statusBar().showMessage(f"已加载 {len(books)} 本电子书")
+        if self.tab_widget.currentIndex() == 1:
+            self.dedup_panel.update_books(self._books)
 
     def _on_selection_changed(self, selected: list):
         self.edit_panel.set_books(selected)
@@ -229,6 +329,30 @@ class MainWindow(QMainWindow):
         dialog = ConvertDialog(books, self._converter, self)
         dialog.exec()
 
+    def _on_books_removed(self, books: list):
+        removed_paths = {b.original_path for b in books}
+        self._books = [b for b in self._books if b.file_path not in removed_paths]
+        self.book_table.load_books(self._books)
+        self.statusBar().showMessage(f"已移除 {len(books)} 本重复书籍")
+        if self.tab_widget.currentIndex() == 2:
+            self.recycle_panel.refresh()
+
+    def _on_entry_restored(self, original_path: str):
+        for entry in self._recycle_bin.get_entries():
+            if entry.original_path == original_path:
+                try:
+                    book = self._parser.parse(original_path)
+                    self._books.append(book)
+                except Exception:
+                    pass
+                break
+        self.book_table.load_books(self._books)
+        self.statusBar().showMessage("文件已恢复")
+
+    def _on_entry_permanently_deleted(self, original_path: str):
+        self._books = [b for b in self._books if b.file_path != original_path and b.original_path != original_path]
+        self.book_table.load_books(self._books)
+
     def _import_files(self):
         files, _ = QFileDialog.getOpenFileNames(
             self, "选择电子书文件", "",
@@ -259,6 +383,8 @@ class MainWindow(QMainWindow):
                 self._books.append(BookMeta(file_path=f, file_format=Path(f).suffix.lstrip("."), title=Path(f).stem))
         self.book_table.load_books(self._books)
         self.statusBar().showMessage(f"已导入 {len(new_files)} 本电子书")
+        if self.tab_widget.currentIndex() == 1:
+            self.dedup_panel.update_books(self._books)
 
     def _check_calibre(self):
         if self._converter.is_calibre_available:
@@ -274,7 +400,14 @@ class MainWindow(QMainWindow):
     def _show_about(self):
         QMessageBox.about(
             self, "关于",
-            "📚 电子书元数据管理器 v1.0\n\n"
+            "📚 电子书元数据管理器 v2.0\n\n"
+            "✨ 新增：智能去重助手\n\n"
+            "功能特点：\n"
+            "• 多维特征指纹（ISBN、书名作者归一化、文件哈希）\n"
+            "• SimHash正文相似度算法\n"
+            "• 智能推荐策略（元数据完整度、格式通用性、体积适中）\n"
+            "• 软删除（移动到回收站）+ 恢复功能\n"
+            "• 详细统计报表（重复组数、预计释放空间）\n\n"
             "支持 EPUB/MOBI/PDF 元数据编辑与格式转换\n"
             "元数据来源: 豆瓣读书、OpenLibrary\n"
             "格式转换依赖: Calibre (ebook-convert)"

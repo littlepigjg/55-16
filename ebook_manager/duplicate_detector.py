@@ -218,7 +218,7 @@ class DuplicateDetector:
                 title_sim = TitleSimilarity.compute(book.title, v.title)
 
                 if require_author_match:
-                    if author_sim < 0.45:
+                    if author_sim < 0.55:
                         continue
 
                 simhash_ok = True
@@ -226,11 +226,11 @@ class DuplicateDetector:
                     simhash_sim = SimHashScore.similarity(book.fingerprint.simhash, v.fingerprint.simhash)
                     simhash_ok = simhash_sim >= self.config.simhash_threshold * 0.8
 
-                if simhash_ok and overall >= 0.60:
+                if simhash_ok and overall >= 0.65:
                     should_add = True
                     break
 
-                if title_sim >= 0.85 and author_sim >= 0.55:
+                if title_sim >= 0.85 and author_sim >= 0.65:
                     should_add = True
                     break
 

@@ -23,9 +23,9 @@ class VerificationResult:
 
 
 class AuthorVerifier:
-    STRICT_AUTHOR_THRESHOLD = 0.80
-    MODERATE_AUTHOR_THRESHOLD = 0.55
-    MIN_AUTHOR_THRESHOLD = 0.35
+    STRICT_AUTHOR_THRESHOLD = 0.85
+    MODERATE_AUTHOR_THRESHOLD = 0.65
+    MIN_AUTHOR_THRESHOLD = 0.45
 
     STRICT_TITLE_THRESHOLD = 0.80
     MODERATE_TITLE_THRESHOLD = 0.60
@@ -63,12 +63,17 @@ class AuthorVerifier:
         ("鲁迅", "迅"),
         ("路遥", "路"),
         ("路遥", "遥远"),
+        ("路遥", "路遥远"),
         ("刘慈欣", "慈欣"),
         ("刘慈欣", "刘欣"),
         ("刘慈欣", "刘慈"),
         ("张爱玲", "爱玲"),
         ("钱钟书", "钟书"),
         ("沈从文", "从文"),
+        ("巴金", "巴金金"),
+        ("老舍", "老"),
+        ("冰心", "冰"),
+        ("莫言", "莫"),
     ]
 
     def __init__(self):
@@ -110,7 +115,8 @@ class AuthorVerifier:
 
         suspicious = self._check_suspicious_pair(author1, author2)
         if suspicious:
-            reasons.append("可疑相似作者名组合，加强验证")
+            author_sim *= 0.35
+            reasons.append(f"⚠️ 可疑相似作者名组合，作者匹配度降权至 {author_sim*100:.0f}%")
 
         author_ok, author_conf = self._evaluate_author(author_sim, author1, author2)
         title_ok, title_conf = self._evaluate_title(title_sim, title1, title2)
@@ -179,21 +185,21 @@ class AuthorVerifier:
 
     def _final_decision(self, author_ok: bool, title_ok: bool,
                         overall: float, author_sim: float, title_sim: float) -> bool:
-        if author_sim < 0.30:
+        if author_sim < 0.40:
             return False
-        if not author_ok and author_sim < 0.50:
+        if not author_ok and author_sim < 0.55:
             return False
         if overall >= 0.80 and author_ok and title_ok:
             return True
         if overall >= 0.75 and author_ok:
             return True
-        if overall >= 0.85 and title_ok and author_sim >= 0.55:
+        if overall >= 0.85 and title_ok and author_sim >= 0.65:
             return True
-        if overall < 0.60:
+        if overall < 0.65:
             return False
         if not author_ok:
             return False
-        return overall >= 0.70
+        return overall >= 0.72
 
     def _check_pseudonyms(self, a1: str, a2: str) -> Tuple[bool, float]:
         clean1 = TextNormalizer.clean_text(a1)
@@ -211,11 +217,27 @@ class AuthorVerifier:
         return False, 0.0
 
     def _check_suspicious_pair(self, a1: str, a2: str) -> bool:
-        clean1 = TextNormalizer.clean_text(a1)
-        clean2 = TextNormalizer.clean_text(a2)
+        clean1 = TextNormalizer.normalize_author(a1)
+        clean2 = TextNormalizer.normalize_author(a2)
+        if clean1 == clean2:
+            return False
+        raw1 = TextNormalizer.clean_text(a1)
+        raw2 = TextNormalizer.clean_text(a2)
         for (x, y) in self.SUSPICIOUS_PAIRS:
+            if (raw1 == x and raw2 == y) or (raw1 == y and raw2 == x):
+                return True
             if (clean1 == x and clean2 == y) or (clean1 == y and clean2 == x):
                 return True
+        cn1 = [c for c in clean1 if "\u4e00" <= c <= "\u9fff"]
+        cn2 = [c for c in clean2 if "\u4e00" <= c <= "\u9fff"]
+        if len(cn1) >= 2 and len(cn2) >= 2:
+            s1, s2 = "".join(cn1), "".join(cn2)
+            if s1 == s2:
+                return False
+            shorter, longer = (s1, s2) if len(s1) <= len(s2) else (s2, s1)
+            if shorter in longer or longer.startswith(shorter) or longer.endswith(shorter):
+                if len(shorter) == 2 and len(longer) == 3:
+                    return True
         return False
 
     def filter_false_positives(

@@ -1,14 +1,15 @@
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
 from pathlib import Path
-import hashlib
-import re
-import unicodedata
+
+from .text_utils import TextNormalizer, ISBNNormalizer, FingerprintGenerator
 
 
 @dataclass
 class BookFingerprint:
     isbn_normalized: str = ""
+    title_key: str = ""
+    author_key: str = ""
     title_author_key: str = ""
     size_hash: str = ""
     simhash: int = 0
@@ -17,6 +18,8 @@ class BookFingerprint:
     def to_dict(self):
         return {
             "isbn_normalized": self.isbn_normalized,
+            "title_key": self.title_key,
+            "author_key": self.author_key,
             "title_author_key": self.title_author_key,
             "size_hash": self.size_hash,
             "simhash": self.simhash,
@@ -27,6 +30,8 @@ class BookFingerprint:
     def from_dict(cls, d: dict):
         return cls(
             isbn_normalized=d.get("isbn_normalized", ""),
+            title_key=d.get("title_key", ""),
+            author_key=d.get("author_key", ""),
             title_author_key=d.get("title_author_key", ""),
             size_hash=d.get("size_hash", ""),
             simhash=d.get("simhash", 0),
@@ -123,101 +128,51 @@ class BookMeta:
         filled = sum(1 for f in fields if f and str(f).strip())
         return filled / len(fields) if fields else 0.0
 
+    def generate_fingerprint_keys(self) -> None:
+        norm_isbn = BookMeta.normalize_isbn(self.isbn)
+        t_key, a_key, ta_key = BookMeta.generate_title_author_keys(self.title, self.author)
+        self.fingerprint.isbn_normalized = norm_isbn
+        self.fingerprint.title_key = t_key
+        self.fingerprint.author_key = a_key
+        self.fingerprint.title_author_key = ta_key
+        if self.file_path:
+            self.fingerprint.size_hash = FingerprintGenerator.size_hash(
+                self.file_size,
+                Path(self.file_path).name
+            )
+
     @staticmethod
     def normalize_text(text: str) -> str:
-        if not text:
-            return ""
-        text = unicodedata.normalize("NFKD", text)
-        ascii_text = text.encode("ascii", "ignore").decode("ascii")
-        chinese_chars = re.findall(r"[\u4e00-\u9fff]", text)
-        text = ascii_text.lower()
-        text = re.sub(r"[^\w\s]", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        stopwords = {"the", "a", "an", "and", "or", "in", "on", "at", "to", "for",
-                     "of", "with", "by", "from", "is", "are", "was", "were",
-                     "be", "been", "being", "have", "has", "had", "do", "does",
-                     "did", "will", "would", "could", "should", "may", "might",
-                     "must", "shall", "can", "need", "dare", "ought", "used",
-                     "de", "la", "le", "les", "du", "des", "un", "une", "el",
-                     "los", "las", "al", "del", "y", "o", "en", "de", "para",
-                     "por", "con", "sin", "sobre", "entre", "a", "o", "e", "do",
-                     "da", "das", "dos", "no", "na", "nas", "nos", "em", "por",
-                     "para", "com", "sem", "sobre", "entre",
-                     "著", "编", "译", "作者", "主编", "校对", "注释",
-                     "新版", "修订版", "珍藏版", "典藏版", "精装版", "平装版",
-                     "全集", "选集", "合集", "套装", "上下册", "全册"}
-        chinese_stopwords = {"著", "编", "译", "作者", "主编", "校对", "注释",
-                            "新版", "修订版", "珍藏版", "典藏版", "精装版", "平装版",
-                            "全集", "选集", "合集", "套装", "上下册", "全册",
-                            "的", "了", "和", "与", "及", "或", "一个", "是", "在",
-                            "我", "你", "他", "她", "它", "这", "那", "有", "不", "没",
-                            "就", "都", "也", "还", "又", "再", "很", "更", "最"}
-        words = [w for w in text.split() if w and w not in stopwords]
-        chinese_filtered = [c for c in chinese_chars if c not in chinese_stopwords]
-        result_words = sorted(words)
-        if chinese_filtered:
-            result_words.extend(sorted(chinese_filtered))
-        return " ".join(result_words)
+        return TextNormalizer.normalize_general(text)
+
+    @staticmethod
+    def normalize_title(text: str) -> str:
+        return TextNormalizer.normalize_title(text)
+
+    @staticmethod
+    def normalize_author(text: str) -> str:
+        return TextNormalizer.normalize_author(text)
 
     @staticmethod
     def normalize_isbn(isbn: str) -> str:
-        if not isbn:
-            return ""
-        digits = re.sub(r"[^\dXx]", "", isbn)
-        digits = digits.upper()
-        if len(digits) == 10:
-            return BookMeta.isbn10_to_isbn13(digits)
-        elif len(digits) == 13:
-            return digits if BookMeta.validate_isbn13(digits) else ""
-        return ""
+        return ISBNNormalizer.normalize(isbn)
 
     @staticmethod
     def isbn10_to_isbn13(isbn10: str) -> str:
-        if len(isbn10) != 10:
-            return ""
-        prefix = "978" + isbn10[:9]
-        total = 0
-        for i, c in enumerate(prefix):
-            digit = int(c)
-            total += digit * (1 if i % 2 == 0 else 3)
-        check = (10 - (total % 10)) % 10
-        return prefix + str(check)
+        return ISBNNormalizer.isbn10_to_isbn13(isbn10)
 
     @staticmethod
     def validate_isbn13(isbn13: str) -> bool:
-        if len(isbn13) != 13 or not isbn13.isdigit():
-            return False
-        total = 0
-        for i, c in enumerate(isbn13[:12]):
-            digit = int(c)
-            total += digit * (1 if i % 2 == 0 else 3)
-        check = (10 - (total % 10)) % 10
-        return str(check) == isbn13[12]
+        return ISBNNormalizer.validate_isbn13(isbn13)
+
+    @staticmethod
+    def generate_title_author_keys(title: str, author: str) -> Tuple[str, str, str]:
+        return FingerprintGenerator.title_author_hash(title, author)
 
     @staticmethod
     def generate_title_author_key(title: str, author: str) -> str:
-        def clean_title(t):
-            if not t:
-                return ""
-            t = re.sub(r"[《》【】\[\]()（）\s]", "", t)
-            t = re.sub(r"(珍藏版|典藏版|修订版|新版|精装版|平装版|全集|选集|合集|套装|上下册|全册|完整版|精简版)$", "", t)
-            t = re.sub(r"(珍藏版|典藏版|修订版|新版|精装版|平装版|全集|选集|合集|套装|上下册|全册|完整版|精简版)", "", t)
-            return t
-
-        def clean_author(a):
-            if not a:
-                return ""
-            a = re.sub(r"[《》【】\[\]()（）\s]", "", a)
-            a = re.sub(r"[著编译注主编校对]$", "", a)
-            a = re.sub(r"[著编译注主编校对]", "", a)
-            return a
-
-        clean_t = clean_title(title)
-        clean_a = clean_author(author)
-        norm_title = BookMeta.normalize_text(clean_t)
-        norm_author = BookMeta.normalize_text(clean_a)
-        key = f"{norm_title}|{norm_author}"
-        return hashlib.md5(key.encode("utf-8")).hexdigest()
+        _, _, combined = FingerprintGenerator.title_author_hash(title, author)
+        return combined
 
     @staticmethod
     def format_size(size_bytes: int) -> str:

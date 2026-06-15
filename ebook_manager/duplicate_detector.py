@@ -1,19 +1,23 @@
-import hashlib
 from typing import List, Dict, Tuple
 from collections import defaultdict
 from dataclasses import dataclass
 
 from .models import BookMeta, DuplicateGroup, BookFingerprint
-from .fingerprint_calculator import SimHash
+from .similarity import (
+    OverallBookSimilarity, SimHashScore,
+    TitleSimilarity, AuthorSimilarity, TextSimilarity
+)
+from .author_verifier import AuthorVerifier, VerificationResult
 
 
 @dataclass
 class MatchConfig:
     isbn_match_threshold: float = 1.0
-    title_author_match_threshold: float = 0.95
-    simhash_threshold: float = 0.85
+    title_author_match_threshold: float = 0.90
+    simhash_threshold: float = 0.80
     size_match_tolerance: float = 0.05
     min_duplicate_size: int = 2
+    author_verification_strict: bool = True
 
 
 class MatchResult:
@@ -30,12 +34,14 @@ class MatchResult:
 class DuplicateDetector:
     def __init__(self, config: MatchConfig = None):
         self.config = config or MatchConfig()
-        self.simhash = SimHash()
+        self.overall_similarity = OverallBookSimilarity()
+        self.author_verifier = AuthorVerifier()
 
     def detect(self, books: List[BookMeta]) -> List[DuplicateGroup]:
         groups = []
         group_id_counter = 0
         processed = set()
+
         isbn_groups = self._group_by_isbn(books)
         for isbn, group_books in isbn_groups.items():
             if len(group_books) >= self.config.min_duplicate_size:
@@ -48,11 +54,13 @@ class DuplicateDetector:
                 groups.append(group)
                 processed.update(b.file_path for b in group_books)
                 group_id_counter += 1
+
         remaining_books = [b for b in books if b.file_path not in processed]
-        title_author_groups = self._group_by_title_author(remaining_books)
+        title_author_groups = self._group_by_title_author_verified(remaining_books)
+
         for key, group_books in title_author_groups.items():
             if len(group_books) >= self.config.min_duplicate_size:
-                verified = self._verify_by_simhash(group_books)
+                verified = self._verify_group(group_books, use_simhash=True)
                 if len(verified) >= self.config.min_duplicate_size:
                     sim = self._calculate_group_similarity(verified)
                     group = DuplicateGroup(
@@ -64,13 +72,34 @@ class DuplicateDetector:
                     groups.append(group)
                     processed.update(b.file_path for b in verified)
                     group_id_counter += 1
+
+        remaining_books = [b for b in remaining_books if b.file_path not in processed]
+        title_only_groups = self._group_by_title_verified(remaining_books)
+
+        for key, group_books in title_only_groups.items():
+            if len(group_books) >= self.config.min_duplicate_size:
+                verified = self._verify_group(group_books, use_simhash=True, require_author_match=True)
+                if len(verified) >= self.config.min_duplicate_size:
+                    sim = self._calculate_group_similarity(verified)
+                    if sim >= 0.70:
+                        group = DuplicateGroup(
+                            group_id=f"group_titleonly_{group_id_counter}",
+                            books=verified,
+                            similarity=sim,
+                            match_type="title_with_author_check"
+                        )
+                        groups.append(group)
+                        processed.update(b.file_path for b in verified)
+                        group_id_counter += 1
+
         remaining_books = [b for b in remaining_books if b.file_path not in processed]
         simhash_groups = self._group_by_simhash(remaining_books)
+
         for simhash_val, group_books in simhash_groups.items():
             if len(group_books) >= self.config.min_duplicate_size:
                 sim = self._calculate_group_similarity(group_books)
                 if sim >= self.config.simhash_threshold:
-                    verified = [b for b in group_books if self._verify_size_match(b, group_books[0])]
+                    verified = self._verify_group(group_books, use_simhash=False, require_author_match=True)
                     if len(verified) >= self.config.min_duplicate_size:
                         group = DuplicateGroup(
                             group_id=f"group_simhash_{group_id_counter}",
@@ -81,20 +110,25 @@ class DuplicateDetector:
                         groups.append(group)
                         processed.update(b.file_path for b in verified)
                         group_id_counter += 1
+
         remaining_books = [b for b in remaining_books if b.file_path not in processed]
         fuzzy_groups = self._fuzzy_grouping(remaining_books)
+
         for group_books in fuzzy_groups:
             if len(group_books) >= self.config.min_duplicate_size:
-                sim = self._calculate_group_similarity(group_books)
-                if sim >= 0.7:
-                    group = DuplicateGroup(
-                        group_id=f"group_fuzzy_{group_id_counter}",
-                        books=group_books,
-                        similarity=sim,
-                        match_type="fuzzy_match"
-                    )
-                    groups.append(group)
-                    group_id_counter += 1
+                verified = self._verify_group(group_books, use_simhash=True, require_author_match=True)
+                if len(verified) >= self.config.min_duplicate_size:
+                    sim = self._calculate_group_similarity(verified)
+                    if sim >= 0.70:
+                        group = DuplicateGroup(
+                            group_id=f"group_fuzzy_{group_id_counter}",
+                            books=verified,
+                            similarity=sim,
+                            match_type="fuzzy_match"
+                        )
+                        groups.append(group)
+                        group_id_counter += 1
+
         return groups
 
     def _group_by_isbn(self, books: List[BookMeta]) -> Dict[str, List[BookMeta]]:
@@ -105,13 +139,60 @@ class DuplicateDetector:
                 groups[isbn].append(book)
         return dict(groups)
 
-    def _group_by_title_author(self, books: List[BookMeta]) -> Dict[str, List[BookMeta]]:
-        groups = defaultdict(list)
+    def _group_by_title_author_verified(self, books: List[BookMeta]) -> Dict[str, List[BookMeta]]:
+        raw_groups = defaultdict(list)
         for book in books:
-            key = book.fingerprint.title_author_key
-            if key:
-                groups[key].append(book)
-        return dict(groups)
+            ta_key = book.fingerprint.title_author_key
+            if ta_key:
+                raw_groups[ta_key].append(book)
+
+        verified_groups = {}
+        for key, candidate_books in raw_groups.items():
+            if len(candidate_books) < 2:
+                continue
+            verified_list = self._author_verify_group(candidate_books)
+            if len(verified_list) >= 2:
+                verified_groups[key] = verified_list
+
+        return verified_groups
+
+    def _group_by_title_verified(self, books: List[BookMeta]) -> Dict[str, List[BookMeta]]:
+        raw_groups = defaultdict(list)
+        for book in books:
+            t_key = book.fingerprint.title_key
+            if t_key:
+                raw_groups[t_key].append(book)
+
+        verified_groups = {}
+        for key, candidate_books in raw_groups.items():
+            if len(candidate_books) < 2:
+                continue
+            verified_list = self._author_verify_group(candidate_books)
+            if len(verified_list) >= 2:
+                verified_groups[key] = verified_list
+
+        return verified_groups
+
+    def _author_verify_group(self, books: List[BookMeta]) -> List[BookMeta]:
+        if len(books) < 2:
+            return books
+
+        verified = [books[0]]
+        for candidate in books[1:]:
+            should_add = False
+            for v in verified:
+                result = self.author_verifier.verify_duplicate_candidate(
+                    title1=v.title, author1=v.author,
+                    title2=candidate.title, author2=candidate.author,
+                    isbn1=v.fingerprint.isbn_normalized,
+                    isbn2=candidate.fingerprint.isbn_normalized,
+                )
+                if result.is_same_book:
+                    should_add = True
+                    break
+            if should_add:
+                verified.append(candidate)
+        return verified
 
     def _group_by_simhash(self, books: List[BookMeta]) -> Dict[int, List[BookMeta]]:
         groups = defaultdict(list)
@@ -120,17 +201,39 @@ class DuplicateDetector:
                 groups[book.fingerprint.simhash].append(book)
         return dict(groups)
 
-    def _verify_by_simhash(self, books: List[BookMeta]) -> List[BookMeta]:
+    def _verify_group(
+        self, books: List[BookMeta],
+        use_simhash: bool = True,
+        require_author_match: bool = False
+    ) -> List[BookMeta]:
         if len(books) < 2:
             return books
+
         verified = [books[0]]
         for book in books[1:]:
             should_add = False
             for v in verified:
-                sim = self._calculate_similarity(book, v)
-                if sim >= self.config.simhash_threshold:
+                overall, _ = self._calculate_pairwise_similarity(book, v)
+                author_sim = AuthorSimilarity.compute(book.author, v.author)
+                title_sim = TitleSimilarity.compute(book.title, v.title)
+
+                if require_author_match:
+                    if author_sim < 0.45:
+                        continue
+
+                simhash_ok = True
+                if use_simhash and book.fingerprint.simhash and v.fingerprint.simhash:
+                    simhash_sim = SimHashScore.similarity(book.fingerprint.simhash, v.fingerprint.simhash)
+                    simhash_ok = simhash_sim >= self.config.simhash_threshold * 0.8
+
+                if simhash_ok and overall >= 0.60:
                     should_add = True
                     break
+
+                if title_sim >= 0.85 and author_sim >= 0.55:
+                    should_add = True
+                    break
+
             if should_add:
                 verified.append(book)
         return verified
@@ -147,67 +250,21 @@ class DuplicateDetector:
             return True
         return ratio < self.config.size_match_tolerance
 
+    def _calculate_pairwise_similarity(self, book1: BookMeta, book2: BookMeta) -> Tuple[float, Dict]:
+        return self.overall_similarity.compute(
+            isbn1=book1.fingerprint.isbn_normalized,
+            isbn2=book2.fingerprint.isbn_normalized,
+            author1=book1.author, author2=book2.author,
+            title1=book1.title, title2=book2.title,
+            simhash1=book1.fingerprint.simhash,
+            simhash2=book2.fingerprint.simhash,
+            size1=book1.file_size, size2=book2.file_size,
+            format1=book1.file_format, format2=book2.file_format,
+        )
+
     def _calculate_similarity(self, book1: BookMeta, book2: BookMeta) -> float:
-        if book1.fingerprint.isbn_normalized and book1.fingerprint.isbn_normalized == book2.fingerprint.isbn_normalized:
-            return 1.0
-
-        author_penalty = 1.0
-        if book1.author and book2.author:
-            author_sim = self._text_similarity(book1.author, book2.author)
-            if author_sim < 0.3:
-                author_penalty = 0.3
-            elif author_sim < 0.5:
-                author_penalty = 0.6
-
-        title_sim = self._text_similarity(book1.title, book2.title)
-        author_sim_score = self._text_similarity(book1.author, book2.author) if (book1.author and book2.author) else 0.5
-        title_author_sim = 0.6 * title_sim + 0.4 * author_sim_score
-
-        if book1.fingerprint.title_author_key and book1.fingerprint.title_author_key == book2.fingerprint.title_author_key:
-            title_author_sim = 1.0
-
-        simhash_sim = SimHash.similarity(
-            book1.fingerprint.simhash,
-            book2.fingerprint.simhash
-        )
-        size_sim = self._size_similarity(book1, book2)
-
-        has_simhash = book1.fingerprint.simhash != 0 and book2.fingerprint.simhash != 0
-        has_isbn = bool(book1.fingerprint.isbn_normalized and book2.fingerprint.isbn_normalized)
-
-        if has_isbn:
-            isbn_weight = 0.4
-            isbn_score = 1.0 if book1.fingerprint.isbn_normalized == book2.fingerprint.isbn_normalized else 0.0
-        else:
-            isbn_weight = 0.0
-            isbn_score = 0.0
-
-        if has_simhash:
-            simhash_weight = 0.4
-        else:
-            simhash_weight = 0.1
-
-        weights = {
-            "isbn": isbn_weight,
-            "title_author": 0.3,
-            "simhash": simhash_weight,
-            "size": 0.2,
-        }
-        total_weight = sum(weights.values())
-        weighted_sim = (
-            weights["isbn"] * isbn_score +
-            weights["title_author"] * title_author_sim +
-            weights["simhash"] * simhash_sim +
-            weights["size"] * size_sim
-        )
-
-        final_sim = weighted_sim / total_weight if total_weight > 0 else 0.0
-        final_sim *= author_penalty
-
-        if title_sim < 0.5:
-            final_sim = min(final_sim, 0.5)
-
-        return final_sim
+        sim, _ = self._calculate_pairwise_similarity(book1, book2)
+        return sim
 
     def _calculate_group_similarity(self, books: List[BookMeta]) -> float:
         if len(books) < 2:
@@ -219,45 +276,6 @@ class DuplicateDetector:
                 total_sim += self._calculate_similarity(books[i], books[j])
                 count += 1
         return total_sim / count if count > 0 else 0.0
-
-    def _text_similarity(self, text1: str, text2: str) -> float:
-        if not text1 or not text2:
-            return 0.0
-        norm1 = BookMeta.normalize_text(text1)
-        norm2 = BookMeta.normalize_text(text2)
-        if norm1 == norm2:
-            return 1.0
-        set1 = set(norm1.split())
-        set2 = set(norm2.split())
-        if not set1 or not set2:
-            return 0.0
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
-        jaccard = intersection / union if union > 0 else 0.0
-        len1 = len(norm1)
-        len2 = len(norm2)
-        longer = max(len1, len2)
-        matches = 0
-        if longer > 0:
-            s1, s2 = (norm1, norm2) if len1 >= len2 else (norm2, norm1)
-            for i in range(len(s2) - 2):
-                substr = s2[i:i+3]
-                if substr in s1:
-                    matches += 1
-            substring_sim = matches / max(len(s2) - 2, 1)
-        else:
-            substring_sim = 0.0
-        return 0.7 * jaccard + 0.3 * substring_sim
-
-    def _size_similarity(self, book1: BookMeta, book2: BookMeta) -> float:
-        if book1.file_size == 0 or book2.file_size == 0:
-            return 0.5
-        size1 = book1.file_size
-        size2 = book2.file_size
-        ratio = min(size1, size2) / max(size1, size2)
-        if book1.file_format != book2.file_format:
-            return min(ratio + 0.2, 1.0)
-        return ratio
 
     def _fuzzy_grouping(self, books: List[BookMeta]) -> List[List[BookMeta]]:
         if len(books) < 2:
@@ -272,8 +290,14 @@ class DuplicateDetector:
             for j, book2 in enumerate(books[i + 1:]):
                 if book2.file_path in processed:
                     continue
+                ver_result = self.author_verifier.verify_duplicate_candidate(
+                    title1=book1.title, author1=book1.author,
+                    title2=book2.title, author2=book2.author,
+                    isbn1=book1.fingerprint.isbn_normalized,
+                    isbn2=book2.fingerprint.isbn_normalized,
+                )
                 sim = self._calculate_similarity(book1, book2)
-                if sim >= 0.6:
+                if ver_result.is_same_book and sim >= 0.55:
                     group.append(book2)
                     processed.add(book2.file_path)
             if len(group) >= self.config.min_duplicate_size:

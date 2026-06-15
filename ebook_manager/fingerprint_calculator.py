@@ -250,15 +250,11 @@ class FingerprintCalculator:
         self.progress_callback = progress_callback
 
     def calculate(self, book: BookMeta) -> BookFingerprint:
-        fingerprint = BookFingerprint()
-        fingerprint.isbn_normalized = BookMeta.normalize_isbn(book.isbn)
-        fingerprint.title_author_key = BookMeta.generate_title_author_key(book.title, book.author)
-        size_str = f"{book.file_size}|{Path(book.file_path).name.lower()}"
-        fingerprint.size_hash = hashlib.md5(size_str.encode("utf-8")).hexdigest()
+        book.generate_fingerprint_keys()
         text = self.text_extractor.extract(book)
-        fingerprint.text_preview = text[:200]
-        fingerprint.simhash = self.simhash.compute(text)
-        return fingerprint
+        book.fingerprint.text_preview = text[:200]
+        book.fingerprint.simhash = self.simhash.compute(text)
+        return book.fingerprint
 
     def calculate_batch(self, books: list) -> list:
         results = []
